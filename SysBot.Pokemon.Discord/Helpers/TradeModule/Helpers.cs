@@ -2638,6 +2638,58 @@ public static class Helpers<T> where T : PKM, new()
             catch (Exception ex) { LogUtil.LogError($"[TradeModule] native last-chance rebuild failed: {ex.Message}", "Helpers"); }
         }
 
+        // NATIVE SPECIES, NON-NATIVE SET: the species HAS a native encounter in our game, but the
+        // member's specific requested SET forces a transfer origin — e.g. $t Conkeldurr with Knock Off:
+        // Knock Off has no SwSh TM/TR, so a native SwSh Conkeldurr can't learn it and ALM must build it
+        // from a Gen 7 (Ultra Moon) origin. The mon is fully legal and usable in-game; it just can't
+        // enter HOME (no tracker). Rather than hard-decline (which wrongly reads as "Conkeldurr isn't in
+        // SwSh"), SHIP it as a legal Non-Native — same as the Z-A bots — and the queue embed shows the
+        // "Non-Native / Cannot enter HOME / AutoOT not applied" notice. A bare-species native probe tells
+        // the two cases apart: Conkeldurr on SwSh probes native (ship), while genuinely-foreign species
+        // (Eternatus on SV, Diancie anywhere) probe null and still fall through to the decline + redirect.
+        if (typeof(T) != typeof(PA9) && isNonNative && result != "PreMadeFile"
+            && !(pk is IHomeTrack htSpec && htSpec.HasTracker)
+            && !HomeOriginAdvisor.IsNativeToBot(pk))
+        {
+            try
+            {
+                // Bare-species template: strip the move lines (the usual culprit) and the Ball line, so
+                // the probe asks only "is THIS species catchable natively here at all?"
+                var bareLines = set.GetSetLines().Where(l =>
+                {
+                    var t = l.TrimStart();
+                    return !t.StartsWith("- ", StringComparison.Ordinal)
+                        && !t.StartsWith("Ball:", StringComparison.OrdinalIgnoreCase);
+                });
+                var bareTemplate = AutoLegalityWrapper.GetTemplate(new ShowdownSet(string.Join("\n", bareLines)));
+
+                bool speciesNativeHere = false;
+                for (int probeAttempt = 0; probeAttempt < 8 && !speciesNativeHere; probeAttempt++)
+                {
+                    var probe = sav.GetLegalNativeDirect(bareTemplate);
+                    if (probe is T pt && HomeOriginAdvisor.IsNativeToBot(pt) && new LegalityAnalysis(pt).Valid)
+                        speciesNativeHere = true;
+                }
+
+                if (speciesNativeHere)
+                {
+                    LogUtil.LogInfo(
+                        $"[TradeModule] {GameInfo.Strings.Species[template.Species]}: species IS native here but the " +
+                        $"requested set forces a {pk.Version} transfer — shipping as legal Non-Native (embed shows the " +
+                        $"notice) instead of declining.", "Helpers");
+                    return Task.FromResult(new ProcessedPokemonResult<T>
+                    {
+                        Pokemon = pk,
+                        ShowdownSet = set,
+                        LgCode = lgcode,
+                        IsNonNative = true,
+                        LevelAdjustedNote = levelAdjustNote
+                    });
+                }
+            }
+            catch (Exception ex) { LogUtil.LogError($"[TradeModule] native-species non-native ship check failed: {ex.Message}", "Helpers"); }
+        }
+
         // Z-A bots are exempt from this HOME-origin decline: they SHIP legal non-native mons (e.g.
         // shiny Groudon/Kyogre/Rayquaza/Heatran/Mewtwo) with the embed's "Non-Native / Cannot enter
         // HOME" notice instead of redirecting. Every other game still declines + advises the right bot.

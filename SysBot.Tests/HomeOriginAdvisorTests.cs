@@ -58,4 +58,32 @@ public class HomeOriginAdvisorTests
         var pk = sav.GetLegalForTrade(AutoLegalityWrapper.GetTemplate(new ShowdownSet($"{species}\nShiny: Yes")), out _);
         HomeOriginAdvisor.IsNativeToBot(pk).Should().BeTrue($"{species} is obtainable in SV — must NOT be declined");
     }
+
+    // A competitive Conkeldurr with Knock Off (no SwSh TM/TR) is legal ONLY as a Gen 7 transfer, so the
+    // full set builds Non-Native — but the SPECIES is SwSh-native (Isle of Armor). The decline gate must
+    // ship it (native-species probe succeeds) instead of redirecting. Guards the "$t Conkeldurr comp set
+    // wrongly declined as 'originates in UM'" fix in Helpers.ProcessShowdownSetAsync.
+    [Fact]
+    public void NativeSpecies_NonNativeSet_ShipsInsteadOfDeclining()
+    {
+        var sav = AutoLegalityWrapper.GetTrainerInfo<PK8>();
+        const string compSet =
+            "Conkeldurr (M) @ Flame Orb\nAbility: Guts\nEVs: 252 HP / 252 Atk / 4 SpD\nAdamant Nature\n" +
+            "- Drain Punch\n- Mach Punch\n- Knock Off\n- Facade";
+
+        // The full requested set is legal but Non-Native (Gen 7 origin) — this is what USED to be declined.
+        var full = sav.GetLegalForTrade(AutoLegalityWrapper.GetTemplate(new ShowdownSet(compSet)), out _);
+        new LegalityAnalysis(full).Valid.Should().BeTrue("the requested Conkeldurr set is legal as a transfer");
+        HomeOriginAdvisor.IsNativeToBot(full).Should().BeFalse("Knock Off forces a Gen 7 origin, so it's Non-Native");
+
+        // The gate signal: a bare-species native probe must SUCCEED for SwSh Conkeldurr → ship, not decline.
+        var probe = sav.GetLegalNativeDirect(AutoLegalityWrapper.GetTemplate(new ShowdownSet("Conkeldurr")));
+        probe.Should().NotBeNull("Conkeldurr IS native to SwSh (Isle of Armor) — the set, not the species, is the issue");
+        HomeOriginAdvisor.IsNativeToBot(probe!).Should().BeTrue();
+
+        // Contrast: a genuinely foreign species probes null and MUST still redirect (gate stays closed).
+        var svSav = AutoLegalityWrapper.GetTrainerInfo<PK9>();
+        svSav.GetLegalNativeDirect(AutoLegalityWrapper.GetTemplate(new ShowdownSet("Eternatus")))
+            .Should().BeNull("Eternatus has no SV-native encounter — must still redirect to a SwSh bot");
+    }
 }
