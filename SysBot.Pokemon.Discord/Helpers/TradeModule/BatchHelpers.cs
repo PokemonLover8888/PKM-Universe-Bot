@@ -18,8 +18,24 @@ public static class BatchHelpers<T> where T : PKM, new()
 {
     public static List<string> ParseBatchTradeContent(string content)
     {
-        var delimiters = new[] { "---", "—-" };
-        return [.. content.Split(delimiters, StringSplitOptions.RemoveEmptyEntries).Select(trade => trade.Trim())];
+        if (string.IsNullOrWhiteSpace(content))
+            return [];
+
+        // Normalize any line that is ONLY dashes — ASCII hyphens, en-dashes, em-dashes, etc.,
+        // any count — into a canonical "---" delimiter. iOS "smart punctuation" silently turns
+        // a typed "---" into a single long dash "—", which the old exact-match splitter didn't
+        // recognize, so a whole batch collapsed into one unparseable set. This accepts "-", "--",
+        // "---", "----", "—", "—-", "–", … on their own line.
+        content = System.Text.RegularExpressions.Regex.Replace(
+            content, @"(?m)^[ \t]*[-‒-―−]{1,}[ \t]*$", "---");
+
+        // Split on that delimiter OR on one-or-more blank lines between sets. A Showdown set never
+        // contains a blank line, so a blank line always means "the next Pokémon starts here" — this
+        // lets members separate sets with either "---" or just an empty line.
+        var parts = System.Text.RegularExpressions.Regex.Split(
+            content, @"(?:\r?\n)?[ \t]*---[ \t]*(?:\r?\n)?|(?:\r?\n[ \t]*){2,}");
+
+        return [.. parts.Select(trade => trade.Trim()).Where(trade => !string.IsNullOrWhiteSpace(trade))];
     }
 
     public static async Task<(T? Pokemon, string? Error, ShowdownSet? Set, string? LegalizationHint)>
@@ -214,14 +230,37 @@ public static class BatchHelpers<T> where T : PKM, new()
 
     public static async Task SendBatchErrorEmbedAsync(SocketCommandContext context, List<BatchTradeError> errors, int totalTrades)
     {
+        // A parse error means the set text couldn't be read at all — almost always because the
+        // Pokémon weren't separated, so the whole batch collapsed into one giant unparseable set.
+        // Dumping that blob back (the old behavior) just confused members; show them the fix instead.
+        static bool IsParse(BatchTradeError e) =>
+            (e.ErrorMessage ?? string.Empty).IndexOf("Unable to parse", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        bool anyParse = errors.Any(IsParse);
+
         var embed = new EmbedBuilder()
             .WithTitle("❌ Batch Trade Validation Failed")
             .WithColor(Color.Red)
-            .WithDescription($"{errors.Count} out of {totalTrades} Pokémon could not be processed.")
-            .WithFooter("Please fix the invalid sets and try again.");
+            .WithDescription($"**{errors.Count}** of **{totalTrades}** set(s) couldn't be processed.")
+            .WithFooter("Fix the set(s) above, then send the batch again.");
+
+        if (anyParse)
+        {
+            embed.AddField("📋 Separate each Pokémon",
+                "It looks like your Pokémon ran together into one set. Put **`---`** on its own line — " +
+                "**or just leave a blank line** — between every Pokémon:\n" +
+                "```\nGarchomp @ Life Orb\nJolly Nature\n- Earthquake\n- Dragon Claw\n---\n" +
+                "Rotom-Wash @ Leftovers\nBold Nature\n- Hydro Pump\n- Volt Switch\n```" +
+                "📱 iPhone tip: `---` works even if autocorrect turns it into a long dash, but if a set " +
+                "still won't split, a blank line between them always works.");
+        }
 
         foreach (var error in errors)
         {
+            // Parse errors are all covered by the single help field above — don't repeat the confusing dump.
+            if (IsParse(error))
+                continue;
+
             var fieldValue = $"**Error:** {error.ErrorMessage}";
             if (!string.IsNullOrEmpty(error.LegalizationHint))
             {
@@ -243,7 +282,7 @@ public static class BatchHelpers<T> where T : PKM, new()
         }
 
         var replyMessage = await context.Channel.SendMessageAsync(embed: embed.Build());
-        _ = Helpers<T>.DeleteMessagesAfterDelayAsync(replyMessage, context.Message, 20);
+        _ = Helpers<T>.DeleteMessagesAfterDelayAsync(replyMessage, context.Message, 30);
     }
 
     public static async Task ProcessBatchContainer(SocketCommandContext context, List<T> batchPokemonList,
