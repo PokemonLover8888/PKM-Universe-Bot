@@ -307,6 +307,12 @@ namespace SysBot.Pokemon.Discord.Helpers
                 if (string.IsNullOrWhiteSpace(line))
                     continue;
 
+                // PKHeX 26.8.26 renamed the StatNature property to StatAlignment. Rewrite a raw
+                // ".StatNature=" batch instruction to the new name so ALM/PKHeX's batch editor
+                // still applies it (the friendly "Stat Nature:" form is handled by ProcessStatNature).
+                if (line.StartsWith(".StatNature=", StringComparison.OrdinalIgnoreCase))
+                    line = ".StatAlignment=" + line[".StatNature=".Length..];
+
                 if (!line.Contains(":"))
                 {
                     // Alcremie forms can now add a topping to the flavor without batch command
@@ -475,8 +481,10 @@ namespace SysBot.Pokemon.Discord.Helpers
             if (matchedNature == null)
                 return string.Empty;
 
-            // Return exact batch command Showdown expects
-            return $".StatNature={matchedNature}";
+            // Return exact batch command Showdown expects.
+            // PKHeX 26.8.26 renamed the StatNature property to StatAlignment; emit the new name
+            // so ALM/PKHeX's batch editor still applies it.
+            return $".StatAlignment={matchedNature}";
         }
 
         // Nickname: Suggest → Nickname: [Random]

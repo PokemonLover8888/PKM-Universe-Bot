@@ -28,10 +28,10 @@ namespace SysBot.Pokemon.Discord.Helpers.TradeModule
                 throw new InvalidOperationException("IVEnforcer may only be used for ZA Pokémon.");
 
             // Check if user explicitly requested a different StatNature via batch command (.StatNature=)
-            // If pk.StatNature differs from pk.Nature, it means user wants manual nature minting
+            // If pk.StatAlignment differs from pk.Nature, it means user wants manual nature minting
             // IMPORTANT: Capture this BEFORE any modifications
-            bool hasExplicitStatNature = pk.StatNature != pk.Nature;
-            Nature explicitStatNature = hasExplicitStatNature ? pk.StatNature : Nature.Random;
+            bool hasExplicitStatNature = pk.StatAlignment != pk.Nature;
+            Nature explicitStatNature = hasExplicitStatNature ? pk.StatAlignment : Nature.Random;
 
             // Enforce forced encounters first - support nature minting
             Nature userRequestedNature = desiredNature; // Store user's requested nature for stat nature (minting)
@@ -212,7 +212,7 @@ namespace SysBot.Pokemon.Discord.Helpers.TradeModule
                 // 1. If user explicitly requested a StatNature via batch command, use that
                 // 2. Else if minted (forced nature), use user's requested nature
                 // 3. Else use the actual nature
-                pk.StatNature = hasExplicitStatNature ? explicitStatNature : (isMinted ? userRequestedNature : pk.Nature);
+                pk.StatAlignment = hasExplicitStatNature ? explicitStatNature : (isMinted ? userRequestedNature : pk.Nature);
 
                 // Reapply IVs after PID change
                 pk.SetIVs(ivs);
@@ -320,7 +320,7 @@ namespace SysBot.Pokemon.Discord.Helpers.TradeModule
             // 1.If user explicitly set Stat Nature via batch command(.StatNature = / Stat Nature:), use that.
             // 2.However, if a user requested a different nature than a forced one, mint it(use requested as Stat Nature).
             // 3.Otherwise, use forced nature as Stat Nature.
-            pk.StatNature = hasExplicitStatNature ? explicitStatNature : (isMinted ? userRequestedNature : pk.Nature);
+            pk.StatAlignment = hasExplicitStatNature ? explicitStatNature : (isMinted ? userRequestedNature : pk.Nature);
 
             pk.SetIVs(ivs);
 

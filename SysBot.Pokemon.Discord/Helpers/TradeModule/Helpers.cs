@@ -963,7 +963,7 @@ public static class Helpers<T> where T : PKM, new()
                                                 // StatNature is the in-game mint and is fully legal, so the mon
                                                 // DISPLAYS the requested nature while staying legal.
                                                 if (set.Nature != Nature.Random)
-                                                    preMade.StatNature = set.Nature;
+                                                    preMade.StatAlignment = set.Nature;
 
                                                 // IVs — Hyper Training (bottle caps) only. SetIVs would break the
                                                 // seed correlation; HT makes every stat BATTLE at 31 at Lv50+
@@ -2295,16 +2295,21 @@ public static class Helpers<T> where T : PKM, new()
             bool userRequestedNature = requestedNature != Nature.Random;
 
             // Detect if the user explicitly set a StatNature via .StatNature= batch command.
-            // IMPORTANT: We parse the content string directly rather than comparing pk.StatNature != pk.Nature.
+            // IMPORTANT: We parse the content string directly rather than comparing pk.StatAlignment != pk.Nature.
             // After ALM generation and/or HOME conversion the StatNature byte can differ from Nature as
             // a format-conversion artifact — checking PKM fields would misidentify that as a user request.
             Nature? userExplicitStatNature = null;
             foreach (var line in contentLines)
             {
                 var trimmed = line.Trim();
-                if (trimmed.StartsWith(".StatNature=", StringComparison.OrdinalIgnoreCase))
+                // PKHeX 26.8.26 renamed StatNature → StatAlignment; the normalizer now emits
+                // ".StatAlignment=", but accept the old ".StatNature=" too for safety.
+                var snPrefix = trimmed.StartsWith(".StatAlignment=", StringComparison.OrdinalIgnoreCase) ? ".StatAlignment="
+                             : trimmed.StartsWith(".StatNature=", StringComparison.OrdinalIgnoreCase) ? ".StatNature="
+                             : null;
+                if (snPrefix != null)
                 {
-                    var value = trimmed[".StatNature=".Length..].Trim();
+                    var value = trimmed[snPrefix.Length..].Trim();
                     if (Enum.TryParse<Nature>(value, ignoreCase: true, out var parsedSN))
                     {
                         userExplicitStatNature = parsedSN;
@@ -2334,7 +2339,7 @@ public static class Helpers<T> where T : PKM, new()
                         $"{pk.Nature}. Restoring {lockedNature} and minting StatNature={mintedTo}.",
                         "NatureLegality");
                     pk.Nature = lockedNature;
-                    pk.StatNature = mintedTo;
+                    pk.StatAlignment = mintedTo;
                     pk.RefreshChecksum();
                 }
             }
@@ -2345,14 +2350,14 @@ public static class Helpers<T> where T : PKM, new()
                 // Test whether the user's requested nature is legal for this encounter.
                 var clone = (T)pk.Clone();
                 clone.Nature = requestedNature;
-                clone.StatNature = hasExplicitStatNature ? userStatNature : requestedNature;
+                clone.StatAlignment = hasExplicitStatNature ? userStatNature : requestedNature;
                 clone.RefreshChecksum();
 
                 if (new LegalityAnalysis(clone).Valid)
                 {
                     // Legal — apply the requested nature to both Nature and StatNature.
                     pk.Nature = clone.Nature;
-                    pk.StatNature = clone.StatNature;
+                    pk.StatAlignment = clone.StatAlignment;
                     pk.RefreshChecksum();
                     LogUtil.LogInfo(
                         $"{(Species)pk.Species}: Requested nature {requestedNature} is legal — applied.",
@@ -2367,17 +2372,17 @@ public static class Helpers<T> where T : PKM, new()
                     // and will also reject a mismatched StatNature.
                     var wantedStatNature = hasExplicitStatNature ? userStatNature : requestedNature;
                     var cloneMint = (T)pk.Clone();
-                    cloneMint.StatNature = wantedStatNature;
+                    cloneMint.StatAlignment = wantedStatNature;
                     cloneMint.RefreshChecksum();
 
                     if (new LegalityAnalysis(cloneMint).Valid)
                     {
                         // Mint is legal — apply it.
-                        pk.StatNature = wantedStatNature;
+                        pk.StatAlignment = wantedStatNature;
                         pk.RefreshChecksum();
                         LogUtil.LogInfo(
                             $"{(Species)pk.Species}: Requested nature {requestedNature} is illegal for this encounter. " +
-                            $"Mint applied: Nature={pk.Nature}, StatNature={pk.StatNature}.",
+                            $"Mint applied: Nature={pk.Nature}, StatNature={pk.StatAlignment}.",
                             "NatureLegality");
                     }
                     else
@@ -2386,7 +2391,7 @@ public static class Helpers<T> where T : PKM, new()
                         // Leave Nature and StatNature exactly as PKHeX produced them — both forced.
                         LogUtil.LogInfo(
                             $"{(Species)pk.Species}: Requested nature {requestedNature} is illegal and minting is " +
-                            $"restricted for this encounter. Keeping forced Nature={pk.Nature}, StatNature={pk.StatNature}.",
+                            $"restricted for this encounter. Keeping forced Nature={pk.Nature}, StatNature={pk.StatAlignment}.",
                             "NatureLegality");
                     }
                 }
@@ -2397,7 +2402,7 @@ public static class Helpers<T> where T : PKM, new()
                 // unless the user already set a different StatNature via batch command.
                 if (!hasExplicitStatNature)
                 {
-                    pk.StatNature = pk.Nature;
+                    pk.StatAlignment = pk.Nature;
                     pk.RefreshChecksum();
                 }
             }

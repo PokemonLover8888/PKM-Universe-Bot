@@ -182,7 +182,7 @@ public static class CreatePokemonHelper
             if (Enum.TryParse<Nature>(finalNature, true, out var parsedNature))
             {
                 pk.Nature = parsedNature;
-                pk.StatNature = parsedNature;
+                pk.StatAlignment = parsedNature;
             }
 
             // Refresh stats after IV/Nature changes

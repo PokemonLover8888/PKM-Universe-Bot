@@ -25,7 +25,7 @@ public class NatureLockTests
         var pk = sav.GetLegalForTrade(AutoLegalityWrapper.GetTemplate(set), out _);
 
         pk.Nature.Should().Be(Nature.Hardy);
-        pk.StatNature.Should().Be(requested);
+        pk.StatAlignment.Should().Be(requested);
         new LegalityAnalysis(pk).Valid.Should().BeTrue();
     }
 }

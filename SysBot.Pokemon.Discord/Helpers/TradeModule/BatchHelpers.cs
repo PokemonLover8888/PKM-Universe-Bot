@@ -75,8 +75,8 @@ public static class BatchHelpers<T> where T : PKM, new()
                 if (pk.Version == GameVersion.ZA && !pk.FatefulEncounter)
                 {
                     // Check if user explicitly set a different StatNature via batch command (.StatNature=)
-                    bool hasExplicitStatNature = pk.StatNature != pk.Nature;
-                    Nature explicitStatNature = hasExplicitStatNature ? pk.StatNature : Nature.Random;
+                    bool hasExplicitStatNature = pk.StatAlignment != pk.Nature;
+                    Nature explicitStatNature = hasExplicitStatNature ? pk.StatAlignment : Nature.Random;
 
                     // Store user's requested nature for stat nature (minting)
                     Nature userRequestedNature = set.Nature;
@@ -89,7 +89,7 @@ public static class BatchHelpers<T> where T : PKM, new()
                         {
                             // User requested an illegal Nature - mint it as Stat Nature
                             pk.Nature = randomLegalNature;
-                            pk.StatNature = hasExplicitStatNature ? explicitStatNature : userRequestedNature;
+                            pk.StatAlignment = hasExplicitStatNature ? explicitStatNature : userRequestedNature;
                             LogUtil.LogInfo(
                                 $"{(Species)pk.Species}: Requested Nature {userRequestedNature} is illegal as actual Nature. Using random legal Nature {randomLegalNature} (actual) with {(hasExplicitStatNature ? explicitStatNature : userRequestedNature)} (stat nature/minted) - batch trade",
                                 nameof(BatchHelpers<T>));
@@ -99,7 +99,7 @@ public static class BatchHelpers<T> where T : PKM, new()
                         {
                             // No specific Nature requested, use random legal Nature
                             pk.Nature = randomLegalNature;
-                            pk.StatNature = hasExplicitStatNature ? explicitStatNature : randomLegalNature;
+                            pk.StatAlignment = hasExplicitStatNature ? explicitStatNature : randomLegalNature;
                             LogUtil.LogInfo(
                                 $"{(Species)pk.Species}: Using random legal Nature {randomLegalNature} (special Nature handling - batch trade)",
                                 nameof(BatchHelpers<T>));
@@ -109,7 +109,7 @@ public static class BatchHelpers<T> where T : PKM, new()
                         {
                             // User requested a legal Nature
                             pk.Nature = userRequestedNature;
-                            pk.StatNature = hasExplicitStatNature ? explicitStatNature : userRequestedNature;
+                            pk.StatAlignment = hasExplicitStatNature ? explicitStatNature : userRequestedNature;
                             LogUtil.LogInfo(
                                 $"{(Species)pk.Species}: Using requested legal Nature {userRequestedNature} (special Nature handling - batch trade)",
                                 nameof(BatchHelpers<T>));
@@ -128,21 +128,21 @@ public static class BatchHelpers<T> where T : PKM, new()
                             // 3.Otherwise, use forced nature as Stat Nature.
                             if (hasExplicitStatNature)
                             {
-                                pk.StatNature = explicitStatNature;
+                                pk.StatAlignment = explicitStatNature;
                                 LogUtil.LogInfo(
                                     $"{(Species)pk.Species}: Nature forced to {forcedNature} with explicit StatNature {explicitStatNature} (static encounter - batch trade)",
                                     nameof(BatchHelpers<T>));
                             }
                             else if (userRequestedNature != Nature.Random && userRequestedNature != forcedNature)
                             {
-                                pk.StatNature = userRequestedNature;
+                                pk.StatAlignment = userRequestedNature;
                                 LogUtil.LogInfo(
                                     $"{(Species)pk.Species}: Nature minted from {forcedNature} (actual) to {userRequestedNature} (stat nature) due to static encounter (batch trade)",
                                     nameof(BatchHelpers<T>));
                             }
                             else
                             {
-                                pk.StatNature = forcedNature;
+                                pk.StatAlignment = forcedNature;
                                 LogUtil.LogInfo(
                                     $"{(Species)pk.Species}: User-requested Nature overridden to {forcedNature} (forced encounter rule - batch trade)",
                                     nameof(BatchHelpers<T>));
@@ -161,7 +161,7 @@ public static class BatchHelpers<T> where T : PKM, new()
                 // Nature=Hardy/StatNature=Modest (a legal mint), this saw "Hardy != Modest" and
                 // stamped Modest onto the ACTUAL Nature — making the mon illegal and voiding its
                 // HOME tracker, so HOME refused the deposit. Its "did the user ask for a StatNature?"
-                // probe (pk.StatNature != pk.Nature) was self-defeating too: that is precisely the
+                // probe (pk.StatAlignment != pk.Nature) was self-defeating too: that is precisely the
                 // signature of a legitimately minted encounter, not of a user request.
                 //
                 // ProcessShowdownSetAsync (called above) already applies the requested nature and
@@ -175,8 +175,8 @@ public static class BatchHelpers<T> where T : PKM, new()
                 if (pk.Version == GameVersion.ZA)
                 {
                     // Capture explicit StatNature BEFORE IVEnforcer runs
-                    bool hasExplicitStatNature = pk.StatNature != pk.Nature;
-                    Nature explicitStatNature = hasExplicitStatNature ? pk.StatNature : Nature.Random;
+                    bool hasExplicitStatNature = pk.StatAlignment != pk.Nature;
+                    Nature explicitStatNature = hasExplicitStatNature ? pk.StatAlignment : Nature.Random;
 
                     // Always pass full IV array if present; otherwise default logic applies inside IVEnforcer
                     int[] requestedIVs =
@@ -211,12 +211,12 @@ public static class BatchHelpers<T> where T : PKM, new()
 
                     // Restore explicit Stat Nature if user set it
                     // IVEnforcer should preserve it, but double-check as a safety measure
-                    if (hasExplicitStatNature && pk.StatNature != explicitStatNature)
+                    if (hasExplicitStatNature && pk.StatAlignment != explicitStatNature)
                     {
                         LogUtil.LogInfo(
-                            $"{(Species)pk.Species}: Restoring explicit StatNature {explicitStatNature} (was changed to {pk.StatNature})",
+                            $"{(Species)pk.Species}: Restoring explicit StatNature {explicitStatNature} (was changed to {pk.StatAlignment})",
                             nameof(BatchHelpers<T>));
-                        pk.StatNature = explicitStatNature;
+                        pk.StatAlignment = explicitStatNature;
                         pk.RefreshChecksum();
                     }
                 }

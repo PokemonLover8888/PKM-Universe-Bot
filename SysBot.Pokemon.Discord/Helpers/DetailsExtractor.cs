@@ -186,9 +186,9 @@ public static class DetailsExtractor<T> where T : PKM, new()
         embedData.Nature = GetNatureName(pk, strings);
 
         // For PLZA (PA9), extract Stat Nature if it differs from regular Nature
-        if (pk is PA9 && pk.StatNature != pk.Nature)
+        if (pk is PA9 && pk.StatAlignment != pk.Nature)
         {
-            embedData.StatNature = strings.natures[(int)pk.StatNature];
+            embedData.StatNature = strings.natures[(int)pk.StatAlignment];
         }
 
         embedData.SpeciesName = strings.Species[pk.Species];
