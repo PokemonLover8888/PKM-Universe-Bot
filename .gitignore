@@ -401,3 +401,9 @@ probe/
 probe-old/
 probe_sav.csx
 ZIP-FIX-HANDOFF.md
+
+# Local scratch backups: "*.bak" does NOT match "file.cs.bak-otfix-20260921".
+# 31 of these (~21MB, incl. an 18MB PKHeX.Core.dll copy) were one `git add -A` away
+# from being permanent history in a PUBLIC repo. 2026-09-23.
+*.bak-*
+*.bak.*
