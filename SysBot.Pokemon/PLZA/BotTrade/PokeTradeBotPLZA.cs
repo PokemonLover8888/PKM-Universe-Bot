@@ -315,13 +315,43 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
             return goClone;
         }
 
-        if (toSend is IHomeTrack pk && pk.HasTracker)
+        // A mon still carrying the CONFIGURED generator trainer is one this bot built moments ago,
+        // not a preserved file. Both guards below exist to protect genuine transfers -- a real HOME
+        // tracker, or a cross-generation file whose OT belongs to its original catcher -- and neither
+        // applies to our own output. Without this, the Z-A shiny legendaries routed SwSh -> HOME -> PA9
+        // shipped with the generator's OT instead of the member's, because that path stamps a tracker
+        // and lands as Generation 8 in Format 9.
+
+        var genCfg = Hub.Config.Legality;
+        // Two shapes count as "we just made this":
+        //   1. the configured generator trainer (GenerateOT/TID/SID), and
+        //   2. THIS CONSOLE'S OWN SAVE -- ALM builds from the live save, so a freshly generated mon
+        //      carries the Switch player's name. On the Z-A console that is "Dude", which is exactly
+        //      what members were receiving. A real preserved file never matches the local save.
+        bool isBotGenerated = (toSend.OriginalTrainerName.Equals(genCfg.GenerateOT, StringComparison.OrdinalIgnoreCase)
+                               && toSend.TID16 == genCfg.GenerateTID16
+                               && toSend.SID16 == genCfg.GenerateSID16)
+                              || (toSend.OriginalTrainerName.Equals(sav.OT, StringComparison.Ordinal)
+                                  && toSend.TID16 == sav.TID16
+                                  && toSend.SID16 == sav.SID16)
+                              // 3. a cross-generation file with NO HOME tracker. A real transfer always
+                              //    carries a tracker (HOME issues one on the way through), so gen != fmt
+                              //    with tracker 0 can only be something this bot just built and converted
+                              //    -- e.g. the Z-A legendaries routed SwSh -> PA9, which arrive carrying
+                              //    AutoLegality's own default trainer ("Dude").
+                              || (toSend.Generation != toSend.Format
+                                  && toSend is IHomeTrack noTrk && noTrk.Tracker == 0);
+
+
+        if (!isBotGenerated && toSend is IHomeTrack pk && pk.HasTracker)
         {
+            Log("[AutoOT] skipped: has HOME tracker and is not bot-generated.");
             return toSend;
         }
 
-        if (toSend.Generation != toSend.Format)
+        if (!isBotGenerated && toSend.Generation != toSend.Format)
         {
+            Log("[AutoOT] skipped: cross-generation file and not bot-generated.");
             return toSend;
         }
 
@@ -337,10 +367,14 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
         // ALM's NET10 defaults can be identified by the OT name alone
         bool hasALMDefaults = toSend.OriginalTrainerName.Equals("ALM", StringComparison.OrdinalIgnoreCase);
 
-        bool hasDefaultTrainerInfo = hasConfiguredDefaults || hasALMDefaults;
+        // isBotGenerated also covers the console's own save trainer, which is what a freshly
+        // generated legendary carries -- without it, FatefulEncounter made every generated
+        // legendary look like a genuine Mystery Gift and AutoOT was skipped.
+        bool hasDefaultTrainerInfo = hasConfiguredDefaults || hasALMDefaults || isBotGenerated;
 
         if (isMysteryGift && !hasDefaultTrainerInfo)
         {
+            Log("[AutoOT] skipped: looks like a Mystery Gift with preset trainer info.");
             return toSend;
         }
 
@@ -372,8 +406,12 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
         ClearOTTrash(cln, tradePartner);
 
-        // Hard-code version to ZA since PLZA only has one game version
-        cln.Version = GameVersion.ZA;
+        // Hard-code version to ZA since PLZA only has one game version -- but ONLY for a mon that
+        // was actually born in Z-A. A transferred file (SwSh -> PA9) must keep its real origin game,
+        // or PKHeX can no longer match the Mystery Gift it came from ("Unable to match to a Mystery
+        // Gift in the database"), the whole file reads illegal, and the gate below reverts the OT.
+        if (toSend.Generation == toSend.Format)
+            cln.Version = GameVersion.ZA;
 
         // Set nickname to species name in the Pokemon's language using PKHeX's method
         // This properly handles generation-specific formatting and language-specific names
@@ -382,6 +420,18 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
 
         // Clear handler info - make it look like trade partner is OT and never traded it
         cln.CurrentHandler = 0; // 0 = OT is current handler
+
+        // ...except a cross-generation file, where that state is impossible: a mon that came up from
+        // an older game is always held by a HANDLING trainer, never by its OT. Leaving CurrentHandler
+        // at 0 makes the whole thing illegal, and the legality gate below then silently reverts to the
+        // generator's OT -- which is how members ended up receiving "Dude".
+        if (toSend.Generation != toSend.Format)
+        {
+            cln.HandlingTrainerName = sav.OT;
+            cln.HandlingTrainerGender = sav.Gender;
+            cln.HandlingTrainerLanguage = (byte)sav.Language;
+            cln.CurrentHandler = 1;
+        }
 
         if (toSend.IsShiny)
             cln.PID = (uint)((cln.TID16 ^ cln.SID16 ^ (cln.PID & 0xFFFF) ^ toSend.ShinyXor) << 16) | (cln.PID & 0xFFFF);
@@ -421,6 +471,9 @@ public class PokeTradeBotPLZA(PokeTradeHub<PA9> Hub, PokeBotState Config) : Poke
         }
         else
         {
+            // Say WHY we're reverting -- this branch silently shipped the generator's OT for weeks.
+            var why = tradeSV.Report().Trim();
+            Log("[AutoOT] partner OT made it illegal, reverting to '" + toSend.OriginalTrainerName + "': " + why);
             if (toSend.Species != 0)
             {
                 var boxOffset = await GetBoxStartOffset(token).ConfigureAwait(false);

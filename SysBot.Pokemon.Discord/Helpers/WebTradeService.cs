@@ -2,6 +2,8 @@ using PKHeX.Core;
 using SysBot.Pokemon.Discord.Helpers.TradeModule;
 using SysBot.Pokemon.Helpers;
 using System;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using static SysBot.Pokemon.Helpers.DetailedLegalityChecker;
 
@@ -27,23 +29,65 @@ public static class WebTradeService<T> where T : PKM, new()
             return WebTradeResult.Fail("This bot is not ready yet — try again in a moment.");
 
         var Info = runner.Hub.Queues.Info;
-
-        if (forceShiny && showdownSet.IndexOf("Shiny:", StringComparison.OrdinalIgnoreCase) < 0)
-            showdownSet += "\nShiny: Yes";
-
         ulong userId = discordUserId != 0 ? discordUserId : SyntheticId(username);
-        bool ignoreAutoOT = showdownSet.Contains("OT:") || showdownSet.Contains("TID:") || showdownSet.Contains("SID:");
 
-        var processed = await Helpers<T>.ProcessShowdownSetAsync(showdownSet, ignoreAutoOT).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(processed.Error) || processed.Pokemon == null)
-            return WebTradeResult.Fail(processed.Error ?? "That set could not be legalized.");
+        T pk;
+        string displayName;
+        bool ignoreAutoOT;
 
-        var pk = processed.Pokemon;
-        var displayName = GameInfo.Strings.Species[pk.Species];
-
-        var commandPrefix = runner.Config.Discord.CommandPrefix;
-        if (!DetailedLegalityChecker.IsLegalWithDetailedReport(pk, displayName, commandPrefix, out string? legalityError))
-            return WebTradeResult.Fail("Illegal Pokémon: " + (legalityError ?? "failed the legality check."));
+        // ===== GENUINE VAULT FILE: "VAULT:<index>" hands out the EXACT preserved file (identical to
+        // the Discord .vr command) instead of legalizing a Showdown set. Index is 1-based over the
+        // alphabetical VaultPKMFolder listing (same ordering VaultModule uses). The file is re-read
+        // from disk on every trade, so it's unlimited — nothing is consumed. =====
+        if (showdownSet.StartsWith("VAULT:", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!int.TryParse(showdownSet.AsSpan(6).Trim(), out int vidx) || vidx < 1)
+                return WebTradeResult.Fail("Invalid vault reference.");
+            var vaultFolder = runner.Config.Folder.VaultPKMFolder;
+            if (string.IsNullOrWhiteSpace(vaultFolder) || !Directory.Exists(vaultFolder))
+                return WebTradeResult.Fail("The Vault is not configured on this bot.");
+            var files = Directory.GetFiles(vaultFolder).OrderBy(f => f).ToList();
+            if (vidx > files.Count)
+                return WebTradeResult.Fail("That vault piece no longer exists.");
+            var filePath = files[vidx - 1];
+            var data = await File.ReadAllBytesAsync(filePath).ConfigureAwait(false);
+            var ctx = Path.GetExtension(filePath).ToLowerInvariant() switch
+            {
+                ".pb8" => EntityContext.Gen8b, ".pk8" => EntityContext.Gen8, ".pa8" => EntityContext.Gen8a,
+                ".pk9" => EntityContext.Gen9, ".pa9" => EntityContext.Gen9a, ".pb7" => EntityContext.Gen7b,
+                _ => EntityContext.None,
+            };
+            var entity = ctx != EntityContext.None ? EntityFormat.GetFromBytes(data, ctx) : EntityFormat.GetFromBytes(data);
+            if (entity == null)
+                return WebTradeResult.Fail("Could not read that vault piece.");
+            if (entity is T tp) pk = tp;
+            else
+            {
+                var conv = EntityConverter.ConvertToType(entity, typeof(T), out _) as T;
+                if (conv == null)
+                    return WebTradeResult.Fail("This piece is for a different game — use its matching bot.");
+                pk = conv;
+            }
+            pk.RefreshChecksum();
+            if (!new LegalityAnalysis(pk).Valid)
+                return WebTradeResult.Fail("That vault piece failed legality on this bot.");
+            displayName = GameInfo.Strings.Species[pk.Species];
+            ignoreAutoOT = false; // ApplyAutoOT keeps genuine HOME trackers / fixed-OT events untouched
+        }
+        else
+        {
+            if (forceShiny && showdownSet.IndexOf("Shiny:", StringComparison.OrdinalIgnoreCase) < 0)
+                showdownSet += "\nShiny: Yes";
+            ignoreAutoOT = showdownSet.Contains("OT:") || showdownSet.Contains("TID:") || showdownSet.Contains("SID:");
+            var processed = await Helpers<T>.ProcessShowdownSetAsync(showdownSet, ignoreAutoOT).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(processed.Error) || processed.Pokemon == null)
+                return WebTradeResult.Fail(processed.Error ?? "That set could not be legalized.");
+            pk = processed.Pokemon!;
+            displayName = GameInfo.Strings.Species[pk.Species];
+            var commandPrefix = runner.Config.Discord.CommandPrefix;
+            if (!DetailedLegalityChecker.IsLegalWithDetailedReport(pk, displayName, commandPrefix, out string? legalityError))
+                return WebTradeResult.Fail("Illegal Pokémon: " + (legalityError ?? "failed the legality check."));
+        }
 
         int code = tradeCode > 0 ? tradeCode : Info.GetRandomTradeCode(userId);
         var trainer = new PokeTradeTrainerInfo(username, userId);
@@ -133,8 +177,9 @@ public static class WebTradeService<T> where T : PKM, new()
         int uniqueTradeID = (int)(timestamp & 0x7FFFFFFF);
         bool ignoreAutoOT = allHaveOT;
 
+        // Same uniqueTradeID as the TradeEntry, or the bot can't remove the entry when the batch ends.
         var detail = new PokeTradeDetail<T>(pkms[0], trainer, notifier, PokeTradeType.Batch, code,
-            false, null, 1, pkms.Count, false, ignoreAutoOT: ignoreAutoOT)
+            false, null, 1, pkms.Count, false, uniqueTradeID: uniqueTradeID, ignoreAutoOT: ignoreAutoOT)
         {
             BatchTrades = pkms
         };

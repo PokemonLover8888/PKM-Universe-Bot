@@ -15,27 +15,32 @@ public sealed class RequireQueueRoleAttribute(string RoleName) : PreconditionAtt
 
     // Create a constructor so the name can be specified
 
-    public override Task<PreconditionResult> CheckPermissionsAsync(ICommandContext context, CommandInfo command, IServiceProvider services)
+    public override async Task<PreconditionResult> CheckPermissionsAsync(ICommandContext context, CommandInfo command, IServiceProvider services)
     {
         var mgr = SysCordSettings.Manager;
         if (mgr.Config.AllowGlobalSudo && mgr.CanUseSudo(context.User.Id))
-            return Task.FromResult(PreconditionResult.FromSuccess());
+            return PreconditionResult.FromSuccess();
 
         // Check if this user is a Guild User, which is the only context where roles exist
         if (context.User is not SocketGuildUser gUser)
-            return Task.FromResult(PreconditionResult.FromError("You must be sending the message from a guild to run this command."));
+            return PreconditionResult.FromError("You must be sending the message from a guild to run this command.");
 
-        var roles = gUser.Roles;
-        if (mgr.CanUseSudo(roles.Select(z => z.Name)))
-            return Task.FromResult(PreconditionResult.FromSuccess());
+        var roleNames = gUser.Roles.Select(z => z.Name).ToList();
+        if (mgr.CanUseSudo(roleNames))
+            return PreconditionResult.FromSuccess();
 
         bool canQueue = SysCordSettings.HubConfig.Queues.CanQueue;
         if (!canQueue)
-            return Task.FromResult(PreconditionResult.FromError("Sorry, I am not currently accepting queue requests!"));
+            return PreconditionResult.FromError("Sorry, I am not currently accepting queue requests!");
 
-        if (!mgr.GetHasRoleAccess(RoleName, roles.Select(z => z.Name)))
-            return Task.FromResult(PreconditionResult.FromError("You do not have the required role to run this command."));
+        if (mgr.GetHasRoleAccess(RoleName, roleNames))
+            return PreconditionResult.FromSuccess();
 
-        return Task.FromResult(PreconditionResult.FromSuccess());
+        // Cached roles missed — they can be stale without the Server Members intent. Re-check fresh
+        // over REST so a member who got the role after being cached isn't wrongly blocked.
+        if (await RoleAccessHelper.HasRoleFreshAsync(context, mgr, RoleName).ConfigureAwait(false))
+            return PreconditionResult.FromSuccess();
+
+        return PreconditionResult.FromError("You do not have the required role to run this command.");
     }
 }

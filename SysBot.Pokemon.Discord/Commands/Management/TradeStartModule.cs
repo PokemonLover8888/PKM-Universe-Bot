@@ -93,6 +93,17 @@ public class TradeStartModule<T> : ModuleBase<SocketCommandContext> where T : PK
             if (detail.TotalBatchTrades > 1 && detail.BatchTradeNumber > 1)
                 return;
 
+            // A retry is the SAME trade, so don't announce it again. When a trade fails in a
+            // retryable way (usually "Timed out waiting for trade partner" — the user never came
+            // in-game) the bot requeues it once, and that requeued entry comes back with a FRESH
+            // trade ID. The _startedTrades check below is keyed on detail.ID, so it cannot catch
+            // it: the channel gets a second "Up Next" embed for a trade the user already saw, with
+            // no visible explanation, because the "I'll requeue you" notice goes to their DMs.
+            // Confirmed 2026-09-10 in #hoopa-za: one submission at 5:30:03 produced Up Next ID 29,
+            // then ID 30 at 5:31:25 with no new queue-add embed in between. Fixed 2026-09-10.
+            if (detail.IsRetry)
+                return;
+
             // prevent duplicate embeds per trade
             lock (_startedTrades)
             {

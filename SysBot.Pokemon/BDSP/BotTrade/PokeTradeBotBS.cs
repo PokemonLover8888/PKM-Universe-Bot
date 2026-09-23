@@ -230,7 +230,31 @@ public class PokeTradeBotBS : PokeRoutineExecutor8BS, ICountBot, ITradeBot, IDis
             return goClone;
         }
 
-        if (toSend is IHomeTrack pk && pk.HasTracker)
+        // A mon still carrying the CONFIGURED generator trainer is one this bot built moments ago,
+        // not a preserved file. The guards below protect genuine transfers -- a real HOME tracker, or a
+        // cross-generation file whose OT belongs to its original catcher -- and neither applies to our
+        // own output, which should carry the MEMBER's OT like every other generated trade.
+        var genCfg = Hub.Config.Legality;
+        // Two shapes count as "we just made this":
+        //   1. the configured generator trainer (GenerateOT/TID/SID), and
+        //   2. THIS CONSOLE'S OWN SAVE -- ALM builds from the live save, so a freshly generated mon
+        //      carries the Switch player's name. On the Z-A console that is "Dude", which is exactly
+        //      what members were receiving. A real preserved file never matches the local save.
+        bool isBotGenerated = (toSend.OriginalTrainerName.Equals(genCfg.GenerateOT, StringComparison.OrdinalIgnoreCase)
+                               && toSend.TID16 == genCfg.GenerateTID16
+                               && toSend.SID16 == genCfg.GenerateSID16)
+                              || (toSend.OriginalTrainerName.Equals(sav.OT, StringComparison.Ordinal)
+                                  && toSend.TID16 == sav.TID16
+                                  && toSend.SID16 == sav.SID16)
+                              // 3. a cross-generation file with NO HOME tracker. A real transfer always
+                              //    carries a tracker (HOME issues one on the way through), so gen != fmt
+                              //    with tracker 0 can only be something this bot just built and converted
+                              //    -- e.g. the Z-A legendaries routed SwSh -> PA9, which arrive carrying
+                              //    AutoLegality's own default trainer ("Dude").
+                              || (toSend.Generation != toSend.Format
+                                  && toSend is IHomeTrack noTrk && noTrk.Tracker == 0);
+
+        if (!isBotGenerated && toSend is IHomeTrack pk && pk.HasTracker)
         {
             // A HOME tracker is only ever created by a real HOME transfer; deleting it makes the
             // Pokemon illegal (HOME rejects it as hacked). A genuine in-game native catch has NO
@@ -242,7 +266,7 @@ public class PokeTradeBotBS : PokeRoutineExecutor8BS, ICountBot, ITradeBot, IDis
         }
 
         // Current handler cannot be past gen OT
-        if (toSend.Generation != toSend.Format)
+        if (!isBotGenerated && toSend.Generation != toSend.Format)
         {
             Log("Cannot apply Partner details: Current handler cannot be different gen OT.");
             return toSend;
@@ -267,7 +291,10 @@ public class PokeTradeBotBS : PokeRoutineExecutor8BS, ICountBot, ITradeBot, IDis
         // ALM's NET10 defaults can be identified by the OT name alone
         bool hasALMDefaults = toSend.OriginalTrainerName.Equals("ALM", StringComparison.OrdinalIgnoreCase);
 
-        bool hasDefaultTrainerInfo = hasConfiguredDefaults || hasALMDefaults;
+        // isBotGenerated also covers the console's own save trainer, which is what a freshly
+        // generated legendary carries -- without it, FatefulEncounter made every generated
+        // legendary look like a genuine Mystery Gift and AutoOT was skipped.
+        bool hasDefaultTrainerInfo = hasConfiguredDefaults || hasALMDefaults || isBotGenerated;
 
         if (isMysteryGift && !hasDefaultTrainerInfo)
         {
