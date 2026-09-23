@@ -130,6 +130,26 @@ public static class QueueHelper<T> where T : PKM, new()
             return;
         }
 
+        // Fleet-wide trade cooldown. Checked here because every trade path funnels through this
+        // method, so it applies to $t, /trade and the website alike — unlike Discord's per-channel
+        // slowmode, which only rate-limits messages and can be walked past with a slash command.
+        // Premium/Elite are exempt, and the check fails open if the bridge is unreachable.
+        var cdExempt = FleetCooldown.IsExempt(context);
+        var cdWait = await FleetCooldown.GetRemainingMinutesAsync(trader.Id, cdExempt).ConfigureAwait(false);
+        if (cdWait is int waitMins)
+        {
+            var cdEmbed = new EmbedBuilder()
+                .WithTitle("⏳ Trade Cooldown")
+                .WithColor(new global::Discord.Color(231, 76, 60))
+                .WithDescription($"You can trade again in **{waitMins} minute{(waitMins == 1 ? "" : "s")}**.")
+                .AddField("No trade was used", "Nothing was queued and nothing was charged — just come back when the timer's up.", inline: false)
+                .WithFooter("Premium and Elite members have no cooldown")
+                .Build();
+            var cdMsg = await context.Channel.SendMessageAsync(text: context.User.Mention, embed: cdEmbed).ConfigureAwait(false);
+            _ = Helpers<T>.DeleteMessagesAfterDelayAsync(cdMsg, context.Message, 30);
+            return;
+        }
+
         try
         {
             // Only send trade code for non-batch trades (batch container will handle its own)
@@ -158,6 +178,10 @@ public static class QueueHelper<T> where T : PKM, new()
             }
 
             var result = await AddToTradeQueue(context, trade, code, trainer, sig, routine, type, trader, isBatchTrade, batchTradeNumber, totalBatchTrades, isHiddenTrade, isMysteryEgg, lgcode, ignoreAutoOT, setEdited, isNonNative).ConfigureAwait(false);
+
+            // Clock starts only now — the trade is actually queued. A typo or an illegal set never
+            // reaches this line, so mistakes stay free exactly as the failure embed promises.
+            await FleetCooldown.StartAsync(trader.Id, cdExempt).ConfigureAwait(false);
         }
         catch (HttpException ex)
         {
@@ -428,8 +452,10 @@ public static class QueueHelper<T> where T : PKM, new()
 
         // ignoreAutoOT flows through so a batch that explicitly asked for an OT/TID/SID keeps it,
         // exactly like a single trade does. Without it AutoOT silently overwrites the requested OT.
+        // uniqueTradeID must match the TradeEntry's: the bot removes finished/aborted batches by rebuilding
+        // the entry from detail.UniqueTradeID, and a 0 here left the entry stuck in the queue forever.
         var detail = new PokeTradeDetail<T>(firstTrade, trainer_info, notifier, PokeTradeType.Batch, code,
-            sig == RequestSignificance.Favored, null, 1, totalBatchTrades, false, ignoreAutoOT: ignoreAutoOT)
+            sig == RequestSignificance.Favored, null, 1, totalBatchTrades, false, uniqueTradeID: uniqueTradeID, ignoreAutoOT: ignoreAutoOT)
         {
             BatchTrades = allTrades
         };
@@ -658,10 +684,12 @@ public static class QueueHelper<T> where T : PKM, new()
         if (pk.IsEgg)
         {
             const string eggWebp = "https://creator.pkm-universe.com/assets/pokemon-egg.webp";
+            // Same art as the .webp, but in a format GDI+ can actually decode. Discord renders the
+            // .webp fine, so it stays the embed image; only the colour probe needs the .png.
+            const string eggBasePng = "https://creator.pkm-universe.com/assets/anime-eggs/default-egg.png";
 
             if (pk is PB8)
             {
-                const string eggBasePng = "https://creator.pkm-universe.com/assets/anime-eggs/default-egg.png"; // GDI+-decodable, same art
                 try
                 {
                     // Use the shiny sprite when the egg will hatch shiny so "Shiny: Yes" shows.
@@ -678,7 +706,10 @@ public static class QueueHelper<T> where T : PKM, new()
                 }
             }
 
-            var (eR, eG, eB) = await GetDominantColorAsync(eggWebp);
+            // Probe the .png, not the .webp: System.Drawing has no WebP decoder, so sampling the
+            // .webp threw on every single egg trade ("Error processing image ... Parameter is not
+            // valid") and fell back to white. Same artwork either way. Fixed 2026-09-23.
+            var (eR, eG, eB) = await GetDominantColorAsync(eggBasePng);
             return (eggWebp, new DiscordColor(eR, eG, eB));
         }
 

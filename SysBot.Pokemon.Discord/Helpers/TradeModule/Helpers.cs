@@ -231,11 +231,32 @@ public static class Helpers<T> where T : PKM, new()
         // Now parse the ShowdownSet without the Language line
         if (!ShowdownParsing.TryParseAnyLanguage(contentWithoutLanguage, out ShowdownSet? set) || set == null || set.Species == 0)
         {
-            return Task.FromResult(new ProcessedPokemonResult<T>
+            // A near-miss species name ("$t Hoop" for Hoopa) used to end the request here, and the
+            // member then sat out the channel slowmode before they could even retry. Try to
+            // recover it instead: an unambiguous typo is corrected and the trade continues, and
+            // anything less certain comes back as "did you mean …" so the retry is one edit, not
+            // a guess.
+            var (corrected, suggestions) = TryFixSpeciesTypo(contentWithoutLanguage);
+            if (corrected != null
+                && ShowdownParsing.TryParseAnyLanguage(corrected, out ShowdownSet? fixedSet)
+                && fixedSet is { Species: > 0 })
             {
-                Error = "Unable to parse Showdown set. Could not identify the Pokémon species.",
-                ShowdownSet = set
-            });
+                LogUtil.LogInfo($"[TradeModule] Species typo auto-corrected to {(Species)fixedSet.Species}.", "Helpers");
+                contentWithoutLanguage = corrected;
+                set = fixedSet;
+            }
+            else
+            {
+                var hint = suggestions.Count > 0
+                    ? $"Did you mean **{string.Join("**, **", suggestions)}**?"
+                    : null;
+                return Task.FromResult(new ProcessedPokemonResult<T>
+                {
+                    Error = "Unable to parse Showdown set. Could not identify the Pokémon species.",
+                    LegalizationHint = hint,
+                    ShowdownSet = set
+                });
+            }
         }
 
         var template = AutoLegalityWrapper.GetTemplate(set);
@@ -376,6 +397,21 @@ public static class Helpers<T> where T : PKM, new()
             // Generate egg using ALM
             pkm = sav.GenerateEgg(regenTemplate, out var eggResult);
             result = eggResult.ToString();
+
+            // Some species have NO breedable egg — Manaphy famously produces Phione, so ALM can't
+            // make a Manaphy egg and silently falls through to an ordinary encounter (the user asks
+            // for an egg and receives a Lv100 Legends Arceus Manaphy). The only legal egg for those
+            // species is a specific gift wondercard, so serve a pre-made file instead.
+            if (pkm == null || !pkm.IsEgg)
+            {
+                var preMadeEgg = TryLoadPreMadeEgg(template.Species);
+                if (preMadeEgg != null)
+                {
+                    pkm = preMadeEgg;
+                    result = "PreMadeFile";
+                    LogUtil.LogInfo($"[TradeModule] ALM could not breed an egg for {(Species)template.Species}; served the pre-made egg file.", "Helpers");
+                }
+            }
         }
         else
         {
@@ -419,9 +455,14 @@ public static class Helpers<T> where T : PKM, new()
                 var adjusted = new ShowdownSet(string.Join("\n", lines));
                 var adjustedTemplate = AutoLegalityWrapper.GetTemplate(adjusted);
 
+                // Use the CONFIGURED generator trainer, not the console's own save. sav.OT is whatever
+                // the physical Switch's player is called ("Dude" on the Z-A console), and because this
+                // path stamps a HOME tracker below, AutoOT then refuses to touch the file -- so the
+                // console's name shipped to members. GenerateOT is what every other generated mon carries.
+                var genTrainer = AutoLegalityWrapper.GetFallbackTrainer();
                 ITrainerInfo swshSav = new SimpleTrainerInfo(GameVersion.SW)
                 {
-                    OT = sav.OT, TID16 = sav.TID16, SID16 = sav.SID16, Language = sav.Language,
+                    OT = genTrainer.OT, TID16 = genTrainer.TID16, SID16 = genTrainer.SID16, Language = sav.Language,
                 };
                 var swshPkm = swshSav.GetLegal(adjustedTemplate, out var swshResult);
                 if (swshPkm != null && swshPkm.Species == template.Species)
@@ -991,7 +1032,19 @@ public static class Helpers<T> where T : PKM, new()
                                         }
                                         var preMadeLa = new LegalityAnalysis(preMade);
                                         var preMadeReport = preMadeLa.Report();
-                                        bool isHomeWondercardMismatch = !preMadeLa.Valid &&
+                                        // A file the bot itself broke, vs. one PKHeX is merely too old to know about.
+                                        // Event distributions are shiny-locked; when a member asks for a shiny and we
+                                        // flip the PID on an event pre-made, it stops matching its wondercard and the
+                                        // Classic Ribbon / Fateful Encounter / relearn moves it legitimately carries all
+                                        // become invalid. That is a genuinely illegal mon, not a version gap -- a real
+                                        // "PKHeX too old" case shows ONLY the Mystery-Gift mismatch and nothing else.
+                                        // Skip these so the normal generator runs instead (a shiny Deoxys, for example,
+                                        // is legal from Pokemon GO even though every Deoxys event is shiny-locked).
+                                        bool isBrokenEventShape =
+                                            preMadeReport.Contains("Invalid Ribbons", StringComparison.OrdinalIgnoreCase)
+                                            || preMadeReport.Contains("Fateful Encounter should not be checked", StringComparison.OrdinalIgnoreCase)
+                                            || preMadeReport.Contains("Invalid Relearn Move", StringComparison.OrdinalIgnoreCase);
+                                        bool isHomeWondercardMismatch = !preMadeLa.Valid && !isBrokenEventShape &&
                                             preMadeReport.Contains("Unable to match to a Mystery Gift", StringComparison.OrdinalIgnoreCase);
                                         // Pre-made GO-shiny mythicals (Melmetal, Celebi, Jirachi, etc.) carry a Met Date
                                         // from when the GO event was live. Once the distribution window closes, PKHeX
@@ -1593,6 +1646,25 @@ public static class Helpers<T> where T : PKM, new()
             pkm.RefreshChecksum();
         }
 
+        // FINAL egg guard. The earlier fallback right after GenerateEgg wasn't enough: for a species
+        // with no breedable egg (Manaphy -> Phione) the pipeline kept "repairing" the result into an
+        // ordinary Lv100 Pokemon further down. Re-assert the pre-made egg here, after every other
+        // post-processing step has run, so nothing downstream can undo it.
+        // Fire when the egg is MISSING **or ILLEGAL**. ALM does build a Manaphy egg, but stamps
+        // OT='Dude' (its long-standing trainer leak); this gift takes the receiving player's OT, so
+        // the egg fails legality and the whole trade aborts with "couldn't create a Manaphy".
+        // Swapping in the verified file fixes it — AutoOT then applies the real partner's details.
+        if (isEgg && pkm is not null && (!pkm.IsEgg || !new LegalityAnalysis(pkm).Valid))
+        {
+            var lateEgg = TryLoadPreMadeEgg(pkm.Species);
+            if (lateEgg is not null)
+            {
+                pkm = lateEgg;
+                result = "PreMadeFile";
+                LogUtil.LogInfo($"[TradeModule] Egg requested for {(Species)pkm.Species} but the pipeline produced a non-egg; served the pre-made egg file.", "Helpers");
+            }
+        }
+
         var la = new LegalityAnalysis(pkm);
 
         // Tera Type retry for SV Pokemon when LA reports Tera Type mismatch
@@ -1979,7 +2051,10 @@ public static class Helpers<T> where T : PKM, new()
         // the original set first, then with Level stripped (a too-low level can block native).
         // Only replaces the result when the rebuild is genuinely native (context match), so
         // cross-gen-only species (no Z-A encounter) are left exactly as-is.
-        if (typeof(T) == typeof(PA9) && !isZAWildLegendary && result != "PreMadeFile" && pkm is PA9 stillNonNative
+        // !isEgg for the same reason as the BDSP net below: an egg legitimately reads as
+        // Non-Native here, so without the guard this would rebuild any requested egg into an
+        // ordinary Pokemon.
+        if (typeof(T) == typeof(PA9) && !isZAWildLegendary && result != "PreMadeFile" && !isEgg && pkm is PA9 stillNonNative
             && new LegalityAnalysis(stillNonNative).EncounterOriginal.Context != stillNonNative.Context)
         {
             try
@@ -2038,7 +2113,10 @@ public static class Helpers<T> where T : PKM, new()
         // path. Unlike SV, BDSP bots run PKHeX v26.5.6.0 which DOES enforce shiny-locks, so the
         // la.Valid check inside GetLegalNativeDirect rejects an illegal native shiny (shiny-locked
         // mythical) and the transfer is kept — so this is safe for BOTH shiny and non-shiny.
-        if (typeof(T) == typeof(PB8) && result != "PreMadeFile"
+        // !isEgg is essential: an egg legitimately reads as Invalid to this check (no met location,
+        // level 1, no moves), so without the guard the net "rebuilt" every requested egg into an
+        // ordinary Pokemon. That is exactly what turned Manaphy Egg requests into a Lv100 Manaphy.
+        if (typeof(T) == typeof(PB8) && result != "PreMadeFile" && !isEgg
             && pkm is PB8 bdspNonNative && bdspNonNative.Species == template.Species)
         {
             var bdLa0 = new LegalityAnalysis(bdspNonNative);
@@ -2238,6 +2316,63 @@ public static class Helpers<T> where T : PKM, new()
                 LogUtil.LogError($"[TradeModule] Level auto-correct failed: {ex.Message}", "Helpers");
             }
         }
+
+        // LAST CHANCE for egg requests. The earlier guard runs before several post-processing steps
+        // (language/nickname/AutoOT prep) that re-introduce ALM's OT='Dude' leak, so the egg is
+        // still valid there and invalid by the time we reach this gate. Swap in the verified file
+        // here, right before the request would be rejected, and re-run the analysis on it.
+        if (isEgg && pkm is not null && (!pkm.IsEgg || !la.Valid))
+        {
+            var finalEgg = TryLoadPreMadeEgg(pkm.Species);
+            if (finalEgg is not null)
+            {
+                LogUtil.LogInfo($"[TradeModule] Egg request for {(Species)pkm.Species} failed generation (ot='{pkm.OriginalTrainerName}', isEgg={pkm.IsEgg}); serving the pre-made egg file.", "Helpers");
+                pkm = finalEgg;
+                result = "PreMadeFile";
+                isPreMadeBypass = true;
+                la = new LegalityAnalysis(pkm);
+            }
+        }
+
+        // ============================================================================
+        // EGG BALL ENFORCEMENT
+        // ============================================================================
+        // ALM's GenerateEgg never applies the ball the member asked for -- it only runs the
+        // SetMatchingBalls colour-matching pass -- so an Egg request always shipped in whatever
+        // colour match ALM picked (Repeat for Charmander, Level for others) no matter what the
+        // set said. The normal (non-egg) path is unaffected because GetLegalForTrade does honour
+        // it. Re-apply the requested ball here, after every egg fallback has had its say, and
+        // keep it only while the egg stays legal. Reported by a member 2026-09-23:
+        //   $bt Egg (Charmander) / Ball: Luxury Ball  ->  arrived in a Level Ball.
+        // ============================================================================
+        if (isEgg && pkm is not null && pkm.IsEgg)
+        {
+            var wantedBall = ParseRequestedBall(contentWithoutLanguage);
+            if (wantedBall is not null && pkm.Ball != (byte)wantedBall.Value)
+            {
+                var previousBall = pkm.Ball;
+                pkm.Ball = (byte)wantedBall.Value;
+                pkm.RefreshChecksum();
+                var ballLa = new LegalityAnalysis(pkm);
+                if (ballLa.Valid || isPreMadeBypass)
+                {
+                    la = ballLa;
+                    LogUtil.LogInfo($"[TradeModule] Egg ball: applied requested {wantedBall.Value} Ball (ALM had picked {(Ball)previousBall}).", "Helpers");
+                }
+                else
+                {
+                    // Not a legal ball for this egg (e.g. an Apricorn ball on a species whose
+                    // mother cannot hold it). Put back what ALM chose rather than ship an
+                    // illegal egg -- HOME rejects those.
+                    pkm.Ball = previousBall;
+                    pkm.RefreshChecksum();
+                    LogUtil.LogInfo($"[TradeModule] Egg ball: requested {wantedBall.Value} Ball is illegal for this egg; kept {(Ball)previousBall}.", "Helpers");
+                }
+            }
+        }
+        // ============================================================================
+        // END OF EGG BALL ENFORCEMENT
+        // ============================================================================
 
         if (pkm is not T pk || (!la.Valid && !isPreMadeBypass))
         {
@@ -2535,7 +2670,8 @@ public static class Helpers<T> where T : PKM, new()
         // moves, can't enter HOME. We decline rather than ship that. Legit pre-mades
         // (result == "PreMadeFile") and HOME-transferred Z-A legendaries (real tracker, or
         // IsZANativeSpecies already cleared isNonNative above) still ship normally.
-        if (typeof(T) == typeof(PA9) && isNonNative && result != "PreMadeFile"
+        // !isEgg — see the note on the other Z-A net above.
+        if (typeof(T) == typeof(PA9) && isNonNative && result != "PreMadeFile" && !isEgg
             && !(pk is IHomeTrack zaTrk && zaTrk.HasTracker))
         {
             var spcName = GameInfo.Strings.Species[template.Species];
@@ -2868,6 +3004,102 @@ public static class Helpers<T> where T : PKM, new()
     /// Tuple: (level, shiny, form?) where form is required only when the shiny wondercard uses
     /// a specific form (e.g. Zacian/Zamazenta shiny wondercard is Hero form 0, not Crowned).
     /// </summary>
+    /// <summary>
+    /// Loads a hand-verified egg for species that cannot be bred, so an Egg-mode request still
+    /// returns an egg. Manaphy forced this: breeding it yields Phione, so ALM has no egg encounter
+    /// to build and quietly returns an ordinary Pokemon instead (a request for an egg came back as
+    /// a Lv100 Legends Arceus Manaphy).
+    /// Files live in PreMadeEggFolder as "&lt;dex&gt; - &lt;Species&gt;.&lt;ext&gt;", e.g. "0490 - Manaphy.pb8".
+    /// Deliberately NOT the HOME-Ready folder: that one is index-addressed by $hrr, so inserting a
+    /// file mid-list would shift every request number after it.
+    /// Returns null on anything unexpected, leaving the caller's previous behaviour untouched.
+    /// </summary>
+    private const string PreMadeEggFolder = @"C:\PKM-Work\PreMade-Eggs";
+
+    /// <summary>
+    /// Reads the ball the member asked for out of their raw set.
+    /// PKHeX 26.8.26 does NOT parse a "Ball: X" line into ShowdownSet -- it lands in
+    /// InvalidLines -- so the ball cannot be read back off the parsed set and has to come
+    /// from the text. Accepts "Ball: Luxury Ball", "Ball: Luxury", ".Ball=11" and
+    /// ".Ball=Luxury". Returns null when no ball was requested or it is not recognised.
+    /// </summary>
+    private static Ball? ParseRequestedBall(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return null;
+
+        foreach (var rawLine in content.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            string? value = null;
+
+            if (line.StartsWith("Ball:", StringComparison.OrdinalIgnoreCase))
+                value = line[5..];
+            else if (line.StartsWith(".Ball=", StringComparison.OrdinalIgnoreCase))
+                value = line[6..];
+            else
+                continue;
+
+            value = value.Trim();
+            if (value.Length == 0)
+                continue;
+
+            // ".Ball=11" -- a raw ball id.
+            if (byte.TryParse(value, out var ballId) && Enum.IsDefined(typeof(Ball), (Ball)ballId))
+                return (Ball)ballId;
+
+            // "Luxury Ball" / "Poke Ball" / "Poké Ball" -> the Ball enum name.
+            var name = value.Replace("é", "e").Replace("É", "E");
+            if (name.EndsWith(" Ball", StringComparison.OrdinalIgnoreCase))
+                name = name[..^5];
+            name = name.Replace(" ", string.Empty).Replace("-", string.Empty);
+            if (Enum.TryParse<Ball>(name, true, out var parsed) && parsed != Ball.None)
+                return parsed;
+        }
+
+        return null;
+    }
+
+    private static T? TryLoadPreMadeEgg(ushort species)
+    {
+        try
+        {
+            if (!Directory.Exists(PreMadeEggFolder))
+                return null;
+
+            // .pb8 and .pk8 are both 344 bytes, so the context must come from the extension.
+            var (ext, ctx) = typeof(T).Name switch
+            {
+                nameof(PB8) => (".pb8", EntityContext.Gen8b),
+                nameof(PK8) => (".pk8", EntityContext.Gen8),
+                nameof(PA8) => (".pa8", EntityContext.Gen8a),
+                nameof(PK9) => (".pk9", EntityContext.Gen9),
+                nameof(PA9) => (".pa9", EntityContext.Gen9a),
+                _ => (null, EntityContext.None),
+            };
+            if (ext is null)
+                return null;
+
+            foreach (var file in Directory.GetFiles(PreMadeEggFolder, $"{species:D4}*{ext}"))
+            {
+                var loaded = EntityFormat.GetFromBytes(File.ReadAllBytes(file), ctx);
+                if (loaded is not T egg || egg.Species != species || !egg.IsEgg)
+                    continue;
+                if (!new LegalityAnalysis(egg).Valid)
+                {
+                    LogUtil.LogInfo($"[TradeModule] Pre-made egg {Path.GetFileName(file)} failed legality; ignoring.", "Helpers");
+                    continue;
+                }
+                return egg;
+            }
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogSafe(ex, "Helpers.TryLoadPreMadeEgg");
+        }
+        return null;
+    }
+
     public static (int level, bool shiny, byte? form)? GetSwShLegalEncounter(ushort species, bool userWantsShiny)
     {
         return species switch
@@ -3156,6 +3388,101 @@ public static class Helpers<T> where T : PKM, new()
         };
     }
 
+    /// <summary>
+    /// Recovers a mistyped species name on the first line of a Showdown set ("Hoop" for "Hoopa").
+    /// Returns the corrected set when ONE candidate is clearly right, plus a short suggestion list
+    /// for anything less certain. Only the species token is touched — held item, nickname, gender
+    /// and every other line are left exactly as the member wrote them.
+    /// </summary>
+    private static (string? Corrected, List<string> Suggestions) TryFixSpeciesTypo(string content)
+    {
+        var none = (Corrected: (string?)null, Suggestions: new List<string>());
+        try
+        {
+            var lines = content.Replace("\r\n", "\n").Split('\n');
+            if (lines.Length == 0)
+                return none;
+
+            // First line shape: "Nickname (Species) (F) @ Item" — pull out the species token only.
+            var first = lines[0];
+            var head = first.Split('@')[0].Trim();
+            var inParens = System.Text.RegularExpressions.Regex.Match(head, @"\(([^)]+)\)");
+            // "(M)"/"(F)" is a gender marker, not a species
+            var token = (inParens.Success && inParens.Groups[1].Value.Trim() is { Length: > 1 } inner)
+                ? inner.Trim()
+                : head;
+            token = token.Trim();
+            if (token.Length < 2)
+                return none;
+
+            var names = GameInfo.GetStrings("en").specieslist;
+            var typed = Normalize(token);
+
+            var exact = new List<string>();
+            var prefix = new List<string>();
+            var near = new List<string>();
+            for (int i = 1; i < names.Length; i++)
+            {
+                var name = names[i];
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                var norm = Normalize(name);
+                if (norm == typed) { exact.Add(name); break; }
+                if (norm.StartsWith(typed, StringComparison.Ordinal)) prefix.Add(name);
+                else if (Distance(norm, typed) <= (typed.Length <= 5 ? 1 : 2)) near.Add(name);
+            }
+
+            if (exact.Count > 0)
+                return none;   // the species was fine; something else in the set failed
+
+            // Correct automatically only when there's no ambiguity about what they meant.
+            var candidates = prefix.Count > 0 ? prefix : near;
+            if (candidates.Count == 1)
+            {
+                var replaced = ReplaceToken(first, token, candidates[0]);
+                lines[0] = replaced;
+                return (string.Join("\n", lines), candidates);
+            }
+
+            return (null, candidates.Take(4).ToList());
+        }
+        catch (Exception ex)
+        {
+            LogUtil.LogSafe(ex, "Helpers.TryFixSpeciesTypo");
+            return none;
+        }
+
+        static string Normalize(string v) =>
+            new string(v.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+
+        static string ReplaceToken(string line, string token, string replacement)
+        {
+            var idx = line.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+            return idx < 0 ? replacement : line.Remove(idx, token.Length).Insert(idx, replacement);
+        }
+
+        // Levenshtein, capped by the callers' small thresholds — plenty for one-or-two character slips.
+        static int Distance(string a, string b)
+        {
+            if (Math.Abs(a.Length - b.Length) > 2)
+                return int.MaxValue;
+            var prev = new int[b.Length + 1];
+            var cur = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = j;
+            for (int i = 1; i <= a.Length; i++)
+            {
+                cur[0] = i;
+                for (int j = 1; j <= b.Length; j++)
+                {
+                    var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                    cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                }
+                (prev, cur) = (cur, prev);
+            }
+            return prev[b.Length];
+        }
+    }
+
     public static string GetLegalizationHint(IBattleTemplate template, ITrainerInfo sav, PKM pkm, string speciesName)
     {
         var hint = AutoLegalityWrapper.GetLegalizationHint(template, sav, pkm);
@@ -3183,15 +3510,27 @@ public static class Helpers<T> where T : PKM, new()
             _ = embedBuilder.AddField("💡 Hint", result.LegalizationHint);
         }
 
-        // Reassurance, worded so it can't be misread as "you got a cooldown": a failed/mistake
-        // request never costs the member a trade or applies any cooldown. The bot only counts
-        // trades that actually complete.
+        // A failed request never costs the member a trade and the BOT never applies a cooldown —
+        // but the trade channels carry a Discord slowmode for non-Premium members, so they still
+        // can't post again straight away. The old wording ("retry as many times as you need")
+        // promised something Discord then refused, and members reported it as the bot lying about
+        // cooldowns. Name the slowmode explicitly instead: the bot's part is free, the wait is
+        // Discord's. Anyone whose role bypasses slowmode sees no wait, which matches the text.
         embedBuilder.AddField(
-            "✅ This Was Free — No Cooldown, No Trade Used",
-            "Your mistake did **NOT** put you on cooldown and did **NOT** use a trade. Just fix it and send it again — retry as many times as you need!",
+            "✅ This Was Free — No Trade Used",
+            "Your mistake did **NOT** use one of your trades, and the bot did **NOT** put you on cooldown. Just fix the set and send it again.",
             inline: false);
 
-        embedBuilder.WithFooter("Mistakes never cost you anything • Only completed trades count");
+        // Explain the wait without advertising a way around it. Slash commands DO bypass Discord
+        // slowmode, but pointing every member at /trade would defeat the rate limiting the trade
+        // channels are set up to enforce — so the escape hatch stays unadvertised and the fix for
+        // typos is the auto-correction above, which stops a slowmode cycle being wasted at all.
+        embedBuilder.AddField(
+            "⏳ Why can't I send again straight away?",
+            "That wait is **Discord's slowmode on this channel**, not the bot. Premium and Elite members skip it entirely.",
+            inline: false);
+
+        embedBuilder.WithFooter("Mistakes never use a trade • Only completed trades count");
 
         string userMention = context.User.Mention;
         string messageContent = $"{userMention}, here's the report for your request:";
